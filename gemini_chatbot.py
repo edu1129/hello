@@ -9,187 +9,189 @@ from rich.panel import Panel
 from rich.markdown import Markdown
 from rich.prompt import Prompt
 from rich.syntax import Syntax
+from rich.spinner import Spinner
 
 # ==============================================================================
-#  Configuration
+#  Configuration & Safety Switch
 # ==============================================================================
+# ⚠️ WARNING: Set this to True ONLY if you understand and accept the risk of
+# running AI-generated commands automatically without confirmation.
+AUTO_EXECUTE_ACTIONS = False
+
 ENV_FILE = ".env"
-MODEL_NAME = "gemini-2.5-pro" # Sabse naya aur powerful model
+MODEL_NAME = "gemini-1.5-pro-latest"
 
-# System Prompt jo AI ko guide karta hai
+# Enhanced System Prompt for a more versatile AI
 SYSTEM_PROMPT = """
-You are "Termux Co-pilot", a highly advanced AI assistant for the Termux environment. Your instructions MUST be followed precisely.
+You are "Nexus", a universal command-line and DevOps AI assistant. Your primary function is to help users with tasks on any shell environment, including Termux, Ubuntu, etc.
 
-1.  **Command Format:** ANY shell command you provide MUST be wrapped in double plus signs. Example: `++pkg update && pkg upgrade -y++`.
-2.  **File Creation Format:** To write a file, you MUST use the `nano` block format. The `++EOF++` marker is MANDATORY.
+**Your Core Instructions:**
+1.  **Command Syntax:** ALL executable shell commands MUST be wrapped in double plus signs. Example: `++pip install requests -U++`.
+2.  **File Syntax:** To create or edit a file, you MUST use the `nano` block format. The `++EOF++` marker is mandatory.
     ```
-    ++nano FILENAME.EXT++
-    CODE_CONTENT
+    ++nano path/to/your/file.txt++
+    File content goes here.
+    Line by line.
     ++EOF++
     ```
-3.  **One Step at a Time:** Provide only ONE command or ONE file operation at a time. Wait for the user to execute it before providing the next step.
-4.  **Analyze Output:** After a command is run, I will provide you its output. You must analyze this output (stdout/stderr) to decide the next step. If there was an error, help the user fix it. If it was successful, proceed to the next logical step.
-5.  **Be an Expert:** Act as a true Termux expert. Use `pkg` for installations. Be concise and clear.
+3.  **Tool Awareness:** Be smart about the environment. If the user mentions Termux, prefer `pkg`. If they mention Ubuntu/Debian, use `apt`. If you're not sure, you can use a command like `++command -v apt || command -v pkg++` to check for an available package manager.
+4.  **Sequential Logic:** Provide a logical sequence of commands. You can provide multiple commands in one response. I will execute them in order.
+5.  **Analyze & Adapt:** I will feed you the full output (STDOUT and STDERR) of your last set of commands. Analyze this output to determine if the commands were successful and decide the next logical step. If an error occurred, your next step should be to help fix that error.
 """
 
-# Console setup for beautiful UI
 console = Console()
 
 def setup_api_key():
-    """API Key ko setup aur load karta hai."""
+    """Sets up and loads the API Key with a better UI."""
     load_dotenv(dotenv_path=ENV_FILE)
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        console.print(Panel("[bold yellow]Aapki Gemini API Key nahi mili.[/bold yellow]", title="Setup", border_style="yellow"))
+        console.print(Panel("[bold yellow]Aapki Gemini API Key nahi mili.[/bold yellow]", title="[bold red]Setup Required[/bold red]", border_style="yellow"))
         api_key = Prompt.ask("[green]Apna Gemini API Key yahan paste karein[/green]")
         with open(ENV_FILE, "w") as f:
             f.write(f"GEMINI_API_KEY={api_key}\n")
-        console.print(Panel("[bold green]API Key save ho gayi hai. Ab aap chat kar sakte hain.[/bold green]", title="Success", border_style="green"))
+        console.print(Panel("[bold green]API Key safaltapoorvak save ho gayi hai.[/bold green]", title="[bold green]Success[/bold green]", border_style="green"))
         os.environ["GEMINI_API_KEY"] = api_key
     return api_key
 
-def print_ai_response(text):
-    """AI ke response ko ek sundar panel me print karta hai."""
-    console.print(Panel(
-        Markdown(text),
-        title="Termux Co-pilot",
-        border_style="magenta",
-        padding=(1, 2)
-    ))
+def parse_response_for_actions(response_text):
+    """Parses AI response to find all text, commands, and file operations in order."""
+    # This regex finds nano blocks OR any command wrapped in ++...++
+    pattern = re.compile(
+        r'(\+\+nano\s+(?P<filename>[\w\.\-\/]+)\+\+\n(?P<content>.*?)\n\+\+EOF\+\+)|'
+        r'(\+\+(?P<command>.*?)\+\+)',
+        re.DOTALL
+    )
+    actions = []
+    last_end = 0
+    for match in pattern.finditer(response_text):
+        start, end = match.span()
+        # Add any text between the last action and this one
+        if start > last_end:
+            actions.append({'type': 'text', 'content': response_text[last_end:start].strip()})
 
-def execute_action(action_type, content):
-    """Ek command ya file operation ko execute karta hai."""
-    output_log = ""
-    try:
-        if action_type == 'file':
-            filename, file_content = content
-            confirm = Prompt.ask(
-                f"[bold yellow]AI file [cyan]'{filename}'[/cyan] banana chahta hai. Ijazat hai? (y/n)[/bold yellow]",
-                default="n"
-            )
-            if confirm.lower() == 'y':
-                with open(filename, 'w') as f:
-                    f.write(file_content)
-                success_msg = f"✅ File '{filename}' safaltapoorvak ban gayi."
-                console.print(f"[green]{success_msg}[/green]")
-                output_log = success_msg
-            else:
-                output_log = f"User ne file '{filename}' banane se mana kar diya."
-                console.print(f"[yellow]{output_log}[/yellow]")
+        # Check if it's a file creation block
+        if match.group('filename'):
+            actions.append({
+                'type': 'file',
+                'filename': match.group('filename').strip(),
+                'content': match.group('content').strip()
+            })
+        # Check if it's a command, but filter out parts of the file block syntax
+        elif match.group('command'):
+            command_text = match.group('command').strip()
+            # This check prevents parts of the 'nano' block from being treated as commands
+            if not command_text.startswith('nano ') and command_text != 'EOF':
+                actions.append({'type': 'command', 'command': command_text})
+        
+        last_end = end
 
-        elif action_type == 'command':
-            command = content
-            console.print(Panel(Syntax(command, "bash"), title="Command to Execute", border_style="cyan"))
-            confirm = Prompt.ask(
-                "[bold yellow]Upar diye gaye command ko run karne ki ijazat hai? (y/n)[/bold yellow]",
-                default="n"
-            )
-            if confirm.lower() == 'y':
-                console.print(f"▶️ Executing: [cyan]{command}[/cyan]")
-                result = subprocess.run(command, shell=True, capture_output=True, text=True)
-                if result.stdout:
-                    console.print(Panel(result.stdout.strip(), title="Output (stdout)", border_style="green"))
-                if result.stderr:
-                    console.print(Panel(result.stderr.strip(), title="Error (stderr)", border_style="red"))
-                output_log = f"Command: {command}\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
-            else:
-                output_log = f"User ne command '{command}' run karne se mana kar diya."
-                console.print(f"[yellow]{output_log}[/yellow]")
+    # Add any remaining text after the last action
+    if last_end < len(response_text):
+        actions.append({'type': 'text', 'content': response_text[last_end:].strip()})
+        
+    # Filter out empty actions
+    return [action for action in actions if action.get('content') or action.get('command')]
 
-    except Exception as e:
-        output_log = f"Action execute karte waqt error aaya: {e}"
-        console.print(f"[bold red]{output_log}[/bold red]")
+def execute_actions(actions):
+    """Displays and robustly executes a list of actions."""
+    execution_plan = [a for a in actions if a['type'] in ('command', 'file')]
+    combined_output_log = ""
+    if not execution_plan:
+        for action in actions:
+            if action['type'] == 'text':
+                console.print(Panel(Markdown(action['content']), title="Nexus AI", border_style="magenta", expand=False))
+        return ""
+
+    console.print(Panel("[bold yellow]Nexus AI in kaamo ko anjaam dena chahta hai:",_renderable=...))
+    for i, action in enumerate(execution_plan):
+        if action['type'] == 'file':
+            console.print(f"  {i+1}. 📝 [cyan]File Banayein:[/cyan] {action['filename']}")
+        elif action['type'] == 'command':
+            console.print(f"  {i+1}. 🚀 [cyan]Command Chalayein:[/cyan] `{action['command']}`")
+
+    confirmed = AUTO_EXECUTE_ACTIONS or Prompt.ask("\n[bold red]Kya aap in sabhi kaamo ko anjaam dene ki ijazat dete hain? (y/n)[/bold red]", default="n").lower() == 'y'
     
-    return output_log
-
-def parse_and_run(response_text):
-    """AI ke response ko parse karke step-by-step actions run karta hai."""
-    
-    # Regex to find command or file blocks
-    command_pattern = r'\+\+(.*?)\+\+'
-    file_pattern = r'\+\+nano\s+([\w\.\-\/]+)\+\+\n(.*?)\n\+\+EOF\+\+'
-    
-    # Split text by action blocks to process it sequentially
-    parts = re.split(f"({file_pattern}|{command_pattern})", response_text, flags=re.DOTALL)
-    
-    last_action_output = ""
-
-    for part in parts:
-        if not part or part.isspace():
-            continue
-
-        file_match = re.match(file_pattern, part, re.DOTALL)
-        command_match = re.match(command_pattern, part, re.DOTALL)
-
-        if file_match:
-            filename = file_match.group(1).strip()
-            content = file_match.group(2).strip()
-            last_action_output = execute_action('file', (filename, content))
-        elif command_match and "nano" not in command_match.group(1) and "EOF" not in command_match.group(1):
-            command = command_match.group(1).strip()
-            last_action_output = execute_action('command', command)
-        else:
-            # This is plain text from the AI
-            print_ai_response(part.strip())
+    if confirmed:
+        if AUTO_EXECUTE_ACTIONS:
+            console.print("\n[bold orange_red1]AUTO-EXECUTION MODE: Bina pooche commands run kiye jaa rahe hain...[/bold orange_red1]")
+        console.print("\n--- [bold green]Execution Shuru[/bold green] ---")
+        for action in execution_plan:
+            log_entry = ""
+            try:
+                if action['type'] == 'file':
+                    filename, content = action['filename'], action['content']
+                    console.print(f"\n📝 Writing file: [cyan]{filename}[/cyan]")
+                    with open(filename, 'w') as f: f.write(content)
+                    log_entry = f"✅ File '{filename}' successfully created."
+                    console.print(f"[green]{log_entry}[/green]")
+                
+                elif action['type'] == 'command':
+                    command = action['command']
+                    console.print(f"\n🚀 Executing: [cyan]'{command}'[/cyan]")
+                    with console.status("[bold yellow]Running command...[/bold yellow]", spinner="dots") as status:
+                        # The most robust way to run any shell command
+                        result = subprocess.run(command, shell=True, capture_output=True, text=True, check=False)
+                    
+                    if result.stdout:
+                        console.print(Panel(Syntax(result.stdout.strip(), "bash"), title="Output (stdout)", border_style="green", expand=False))
+                    if result.stderr:
+                        console.print(Panel(Syntax(result.stderr.strip(), "bash"), title="Error (stderr)", border_style="red", expand=False))
+                    
+                    log_entry = f"Command: `{command}`\nExit Code: {result.returncode}\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}\n"
             
-    return last_action_output
-
+            except Exception as e:
+                log_entry = f"❌ Python script error during action: {e}"
+                console.print(f"[bold red]{log_entry}[/bold red]")
+            
+            combined_output_log += log_entry
+        console.print("--- [bold green]Execution Poora Hua[/bold green] ---\n")
+    else:
+        combined_output_log = "User ne execution se mana kar diya."
+        console.print(f"[yellow]{combined_output_log}[/yellow]")
+    return combined_output_log
 
 def main():
     console.print(Panel(
-        "[bold green]Termux AI Co-pilot me aapka swagat hai![/bold green]\n"
-        "Type 'exit', 'quit', ya 'bye' to end the chat.",
-        title="Welcome",
+        "[bold green]Nexus AI Co-pilot me aapka swagat hai![/bold green]\n"
+        "Aapka universal command-line assistant. Type 'exit' to quit.",
+        title="[bold]Welcome[/bold]",
         border_style="green"
     ))
-    
     try:
         api_key = setup_api_key()
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(MODEL_NAME, system_instruction=SYSTEM_PROMPT)
         chat = model.start_chat(history=[])
     except Exception as e:
-        console.print(f"[bold red]Initialization Error: {e}[/bold red]")
+        console.print(Panel(f"Initialization Error: {e}", title="[bold red]Critical Error[/bold red]", border_style="red"))
         return
 
-    first_user_prompt = None
-    last_action_output = ""
-
+    last_execution_summary = ""
     while True:
         user_input = Prompt.ask("\n[bold cyan]You[/bold cyan]")
-
-        if user_input.lower() in ["exit", "quit", "bye"]:
-            console.print("[bold yellow]Alvida! Fir milenge.[/bold yellow]")
-            break
+        if user_input.lower() in ["exit", "quit", "bye"]: break
+        if not user_input.strip(): continue
         
-        if not user_input.strip():
-            continue
-
-        if first_user_prompt is None:
-            first_user_prompt = user_input
-
-        # AI ke liye context taiyar karna
         contextual_prompt = f"""
-        [Main Goal (First thing user said): "{first_user_prompt}"]
+        [Summary of Last Execution's Result:
+        {last_execution_summary if last_execution_summary else "No commands have been executed yet."}]
         
-        [Output/Result of my last instruction:
-        {last_action_output if last_action_output else "Nothing has been executed yet."}]
+        [User's New Instruction: "{user_input}"]
         
-        [User's new message: "{user_input}"]
-        
-        Based on all this, provide the very next single step.
+        Based on the previous results and the new instruction, provide the next logical step(s).
         """
-
         try:
-            with console.status("[bold green]Co-pilot soch raha hai...[/bold green]", spinner="dots"):
+            with console.status("[bold green]Nexus AI soch raha hai...[/bold green]", spinner="dots"):
                 response = chat.send_message(contextual_prompt)
             
-            # AI ke response ko parse karo aur actions execute karo
-            last_action_output = parse_and_run(response.text)
-
+            actions = parse_response_for_actions(response.text)
+            last_execution_summary = execute_actions(actions)
         except Exception as e:
-            console.print(f"[bold red]An error occurred: {e}[/bold red]")
+            console.print(Panel(f"An API or other critical error occurred: {e}", title="[bold red]Runtime Error[/bold red]", border_style="red"))
             break
+            
+    console.print("[bold yellow]Alvida! Fir milenge.[/bold yellow]")
 
 if __name__ == "__main__":
     main()

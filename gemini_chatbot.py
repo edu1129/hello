@@ -19,7 +19,7 @@ from rich.spinner import Spinner
 AUTO_EXECUTE_ACTIONS = False
 
 ENV_FILE = ".env"
-MODEL_NAME = "gemini-1.5-pro-latest"
+MODEL_NAME = "gemini-2.5-pro"
 
 # Enhanced System Prompt for a more versatile AI
 SYSTEM_PROMPT = """

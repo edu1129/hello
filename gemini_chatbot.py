@@ -56,25 +56,41 @@ def setup_api_key():
 
 def parse_response_for_actions(response_text):
     """Parses AI response to find all text, commands, and file operations in order."""
+    # This regex finds nano blocks OR any command wrapped in ++...++
     pattern = re.compile(
-        r'(\+\+nano\s+(?P<filename>[\w\.\-\/]+)\+\+\n(?P<content>.*?)\n\+\+EOF\+\+)|(\+\+(?P<command>.*?)\+\+)',
+        r'(\+\+nano\s+(?P<filename>[\w\.\-\/]+)\+\+\n(?P<content>.*?)\n\+\+EOF\+\+)|'
+        r'(\+\+(?P<command>.*?)\+\+)',
         re.DOTALL
     )
     actions = []
     last_end = 0
     for match in pattern.finditer(response_text):
         start, end = match.span()
+        # Add any text between the last action and this one
         if start > last_end:
             actions.append({'type': 'text', 'content': response_text[last_end:start].strip()})
-        
+
+        # Check if it's a file creation block
         if match.group('filename'):
-            actions.append({'type': 'file', 'filename': match.group('filename').strip(), 'content': match.group('content').strip()})
-        elif match.group('command') and "nano " not in match.group('command') and "EOF" not in match.group('command'):
-            actions.append({'type': 'command', 'command': match.group('command').strip()})
-        last_end = end
+            actions.append({
+                'type': 'file',
+                'filename': match.group('filename').strip(),
+                'content': match.group('content').strip()
+            })
+        # Check if it's a command, but filter out parts of the file block syntax
+        elif match.group('command'):
+            command_text = match.group('command').strip()
+            # This check prevents parts of the 'nano' block from being treated as commands
+            if not command_text.startswith('nano ') and command_text != 'EOF':
+                actions.append({'type': 'command', 'command': command_text})
         
+        last_end = end
+
+    # Add any remaining text after the last action
     if last_end < len(response_text):
         actions.append({'type': 'text', 'content': response_text[last_end:].strip()})
+        
+    # Filter out empty actions
     return [action for action in actions if action.get('content') or action.get('command')]
 
 def execute_actions(actions):
